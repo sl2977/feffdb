@@ -2,8 +2,40 @@ from os import listdir
 from pathlib import Path
 from pyshortcuts.utils import read_textfile
 from feffdb import FeffDatabase
+import csv
+from feffdb.utils import parse_feffdat
 
-def firstshell_paths(run):
+FIRST_SHELL_TOL = 0.05
+
+ATOMIC_NUMBER = {
+    "C": 6, "N": 7, "O": 8, "F": 9, "S": 16, "Cl": 17,
+    "Co": 27, "Ni": 28, "Cu": 29, "Se": 34, "Pt": 78,
+}
+
+ANION_FLOOR = {"O": 1.5, "S": 1.8, "N": 1.5, "Se": 2.0, "Cl": 2.0,
+               "C": 1.5, "F": 1.5}
+
+
+def _first_shell_cut(row):
+    """Longest crystallographic first-shell contact for this structure, + tol."""
+    raw = (row.get("shell") or "").strip()
+    vals = []
+    for part in raw.split(";"):
+        part = part.strip()
+        if part:
+            try:
+                vals.append(float(part))
+            except ValueError:
+                pass
+    if not vals:
+        try:
+            vals = [float(row["mean_R"])]
+        except (KeyError, TypeError, ValueError):
+            return None
+    return max(vals) + FIRST_SHELL_TOL
+
+
+def firstshell_paths(run, scatterer_z=None, cut=None, floor=None):
     """
     find first shell paths for a Feff run. This may find multiple paths:
       -  single-scattering only
@@ -47,7 +79,22 @@ def firstshell_paths(run):
                     paths.append(Path(run, fname))
                     reff_last = reff
                     n_total + n_total + deg
+    if scatterer_z is None:
         return paths
+    kept = []
+    for p in paths:
+        try:
+            dat = parse_feffdat(p.as_posix())
+        except Exception:
+            continue
+        if int(dat['nleg']) != 2 or int(dat['scatterer']) != scatterer_z:
+            continue
+        if floor is not None and float(dat['reff']) < floor:
+            continue
+        if cut is not None and float(dat['reff']) > cut:
+            continue
+        kept.append(p)
+    return kept or paths[:1]
 
 def Add_Liao_Calcs():
     top_folder = 'Liao_Calcs'
@@ -59,6 +106,15 @@ def Add_Liao_Calcs():
         cpath = Path(top_folder, pair, cif_folder)
         if not fpath.exists():
             continue
+        scat = pair.split('-')[1]
+        scatterer_z = ATOMIC_NUMBER.get(scat)
+        floor = ANION_FLOOR.get(scat)
+        cuts = {}
+        csv_path = Path(top_folder, pair, 'feff_bins_summary_AMCSD.csv')
+        if csv_path.exists():
+            with open(csv_path, newline='') as fh:
+                for row in csv.DictReader(fh):
+                    cuts[row['id']] = _first_shell_cut(row)
         for drange in listdir(fpath):
             fpathd = Path(fpath, drange)
             if fpathd.is_dir():
@@ -69,7 +125,7 @@ def Add_Liao_Calcs():
                         feff_inp = frun / 'feff.inp'
                         if feff_inp.exists():
                             print(feff_inp)
-                            for feff_dat in firstshell_paths(frun):
+                            for feff_dat in firstshell_paths(frun, scatterer_z, cuts.get(run), floor):
                                 feffdb.add_feffdat(feff_dat, feff_inp, cif_file=cif_file)
                                 print(f'added {feff_dat}, {pair=} {drange=} {run=}')
 
